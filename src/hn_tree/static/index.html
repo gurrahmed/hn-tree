@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hn-tree</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6ef;
+    --surface: #ffffff;
+    --text: #1c1c1c;
+    --muted: #6f6f6a;
+    --border: #e3e3da;
+    --accent: #ff6600;
+    --rail: #dcdcd2;
+    --fresh: #fff0e3;
+    --error: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111111;
+      --surface: #1b1b1b;
+      --text: #e9e9e6;
+      --muted: #9b9b95;
+      --border: #2d2d2b;
+      --rail: #363634;
+      --fresh: #3a2414;
+      --error: #f97066;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  a { color: inherit; }
+  button { font: inherit; cursor: pointer; }
+
+  header { position: sticky; top: 0; z-index: 1; background: var(--accent); color: #fff; }
+  .bar { max-width: 860px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 12px; }
+  .brand { font-weight: 700; text-decoration: none; }
+  .status { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #fff; }
+  .dot.live { animation: pulse 2s ease-in-out infinite; }
+  .dot.paused { opacity: .4; }
+  .dot.error { background: #5c1a00; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .bar button { background: rgba(255, 255, 255, .22); color: #fff; border: 0; border-radius: 4px; padding: 2px 10px; font-size: 13px; }
+
+  main { max-width: 860px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 4px 0 2px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+
+  .post { display: flex; gap: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-bottom: 8px; }
+  .post.fresh { animation: fresh 4s ease-out; }
+  @keyframes fresh { from { background: var(--fresh); } }
+  .score { flex: none; width: 44px; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.2; }
+  .score b { display: block; color: var(--text); font-size: 15px; }
+  .post-main { min-width: 0; flex: 1; }
+  .title { font-size: 17px; font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
+  a.title:hover { text-decoration: underline; }
+  .domain, .meta { color: var(--muted); font-size: 13px; }
+  .meta a { text-decoration: none; }
+  .meta a:hover { text-decoration: underline; }
+
+  .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; font-size: 14px; }
+  .toolbar a { text-decoration: none; }
+  .toolbar button { margin-left: auto; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 2px 10px; font-size: 13px; }
+
+  .comments { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 12px 12px; }
+  .comment { margin-top: 12px; }
+  .comment-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .author { font-weight: 600; color: var(--text); }
+  .toggle { background: none; border: 0; padding: 0; color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; }
+  .body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
+  .post .body { margin-top: 10px; }
+  .replies { margin-left: 4px; padding-left: 14px; border-left: 2px solid var(--rail); }
+  .comment.collapsed > .body, .comment.collapsed > .replies { display: none; }
+  .placeholder { color: var(--muted); font-style: italic; font-size: 13px; }
+  .error { color: var(--error); }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <a class="brand" href="#">hn-tree</a>
+    <div class="status">
+      <span class="dot" id="dot"></span>
+      <span id="status-text">Connecting…</span>
+      <button type="button" id="pause">Pause</button>
+    </div>
+  </div>
+</header>
+<main>
+  <section id="feed-view">
+    <h1 id="feed-title"></h1>
+    <p class="sub" id="feed-sub"></p>
+    <div id="feed"><p class="placeholder">Loading stories…</p></div>
+  </section>
+  <section id="item-view" hidden></section>
+</main>
+<script type="application/json" id="config">{{config}}</script>
+<script>
+"use strict";
+
+const CONFIG = JSON.parse(document.getElementById("config").textContent);
+const FEED_NAMES = { new: "Newest", top: "Top", best: "Best", ask: "Ask HN", show: "Show HN", job: "Jobs", week: "This week's top" };
+const AGE_UNITS = [["year", 31536000], ["month", 2592000], ["day", 86400], ["hour", 3600], ["minute", 60]];
+const URL_PATTERN = /https?:\/\/[^\s<>"]+/g;
+
+const feedView = document.getElementById("feed-view");
+const itemView = document.getElementById("item-view");
+const feedList = document.getElementById("feed");
+const dot = document.getElementById("dot");
+const statusText = document.getElementById("status-text");
+const pauseButton = document.getElementById("pause");
+
+// Everything is built with DOM calls and textContent, never innerHTML, so API text can't inject markup.
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (value == null) continue;
+    if (key === "class") node.className = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value);
+  }
+  node.append(...children.filter((c) => c != null && c !== false && c !== ""));
+  return node;
+}
+
+function plural(n, word, many = word + "s") {
+  return `${n} ${n === 1 ? word : many}`;
+}
+
+function age(timestamp) {
+  if (timestamp == null) return "unknown time";
+  const seconds = Math.max(0, Date.now() / 1000 - timestamp);
+  for (const [unit, size] of AGE_UNITS) {
+    if (seconds >= size) return `${plural(Math.floor(seconds / size), unit)} ago`;
+  }
+  return "just now";
+}
+
+function safeUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function domain(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
+
+function externalLink(href, ...children) {
+  return el("a", { href, target: "_blank", rel: "noopener noreferrer" }, ...children);
+}
+
+function linkify(text) {
+  const fragment = document.createDocumentFragment();
+  let last = 0;
+  for (const match of text.matchAll(URL_PATTERN)) {
+    // hn-tree writes links as "label (url)", so trailing punctuation is not part of the URL.
+    const url = match[0].replace(/[.,;:!?)\]]+$/, "");
+    fragment.append(text.slice(last, match.index), externalLink(url, url));
+    last = match.index + url.length;
+  }
+  fragment.append(text.slice(last));
+  return fragment;
+}
+
+async function getJSON(path) {
+  const response = await fetch(path, { cache: "no-store" });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+  return data;
+}
+
+// ---- Story rows (feed and the top of a thread) ----
+
+function storyRow(story, { rank, fresh = false, inThread = false } = {}) {
+  const href = story.url && safeUrl(story.url);
+  const itemHref = `#/item/${story.id}`;
+  let title;
+  if (inThread) {
+    const text = story.title || `Comment by ${story.by ?? "unknown"}`;
+    title = href ? externalLink(href, text) : el("span", {}, text);
+    title.className = "title";
+  } else {
+    title = el("a", { class: "title", href: itemHref }, story.title || "(untitled)");
+  }
+  const host = href && domain(href);
+  const comments = plural(story.descendants ?? 0, "comment");
+  return el("article", { class: fresh ? "post fresh" : "post" },
+    el("div", { class: "score" }, rank != null && `#${rank}`, el("b", {}, String(story.score ?? 0)), "points"),
+    el("div", { class: "post-main" },
+      title,
+      host && el("span", { class: "domain" }, " (", externalLink(href, host), ")"),
+      el("div", { class: "meta" },
+        `by ${story.by ?? "unknown"} · ${age(story.time)} · `,
+        inThread ? comments : el("a", { href: itemHref }, comments)),
+      inThread && story.text && el("div", { class: "body" }, linkify(story.text))));
+}
+
+// ---- Feed polling ----
+
+let stories = [];
+let seenIds = null; // ids from earlier polls; null until the first one finishes
+let lastUpdated = null;
+let lastError = null;
+let paused = false;
+let polling = false;
+let timer = null;
+
+function renderFeed() {
+  if (!stories.length) {
+    feedList.replaceChildren(el("p", { class: "placeholder" }, "No stories right now."));
+    return;
+  }
+  feedList.replaceChildren(...stories.map((story, i) =>
+    storyRow(story, { rank: i + 1, fresh: seenIds != null && !seenIds.has(story.id) })));
+}
+
+async function poll() {
+  clearTimeout(timer);
+  if (polling) return;
+  polling = true;
+  try {
+    stories = await getJSON("/api/feed");
+    renderFeed();
+    seenIds = new Set([...(seenIds ?? []), ...stories.map((s) => s.id)]);
+    lastUpdated = Date.now();
+    lastError = null;
+  } catch (err) {
+    lastError = err.message;
+  } finally {
+    polling = false;
+  }
+  updateStatus();
+  schedule();
+}
+
+function schedule() {
+  clearTimeout(timer);
+  // Stop polling in background tabs; the visibilitychange handler catches up on return.
+  if (!paused && !document.hidden) timer = setTimeout(poll, CONFIG.interval * 1000);
+}
+
+function updateStatus() {
+  dot.className = "dot " + (lastError ? "error" : paused ? "paused" : "live");
+  if (lastError) {
+    statusText.textContent = `Update failed: ${lastError}`;
+  } else if (lastUpdated == null) {
+    statusText.textContent = "Connecting…";
+  } else {
+    const seconds = Math.round((Date.now() - lastUpdated) / 1000);
+    statusText.textContent = `${paused ? "Paused · " : ""}updated ${seconds < 2 ? "just now" : `${seconds}s ago`}`;
+  }
+}
+
+pauseButton.addEventListener("click", () => {
+  paused = !paused;
+  pauseButton.textContent = paused ? "Resume" : "Pause";
+  if (paused) clearTimeout(timer);
+  else poll();
+  updateStatus();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) clearTimeout(timer);
+  else if (!paused) poll();
+});
+
+// Keeps the "updated 5s ago" label and the story ages current between polls.
+setInterval(() => {
+  updateStatus();
+  if (!feedView.hidden && stories.length) {
+    for (const [i, row] of [...feedList.children].entries()) {
+      const meta = row.querySelector(".meta");
+      if (meta && stories[i]) meta.firstChild.textContent = `by ${stories[i].by ?? "unknown"} · ${age(stories[i].time)} · `;
+    }
+  }
+}, 1000);
+
+// ---- Comment tree ----
+
+function placeholderFor(node) {
+  if (node.status === "error") return `[failed to load item ${node.id}: ${node.error}]`;
+  if (node.status === "deleted") return "[deleted]";
+  if (node.status === "missing") return "[missing]";
+  if (node.status === "dead" && !CONFIG.showDead) return "[flagged]";
+  return null;
+}
+
+function commentNode(node) {
+  if (node.status === "truncated") {
+    return el("div", { class: "comment placeholder" },
+      `… ${plural(node.hidden_replies, "more reply", "more replies")} not shown`);
+  }
+  const wrapper = el("div", { class: "comment" });
+  const placeholder = placeholderFor(node);
+  const head = placeholder
+    ? el("div", { class: "comment-head" }, el("span", { class: "placeholder" }, placeholder))
+    : el("div", { class: "comment-head" },
+        el("span", { class: "author" }, node.by ?? "unknown"),
+        `· ${age(node.time)}`,
+        node.status === "dead" && el("span", { class: "placeholder" }, "[flagged]"));
+  if (node.children.length) {
+    const toggle = el("button", { class: "toggle", type: "button", "aria-expanded": "true", title: "Collapse thread" }, "[–]");
+    toggle.addEventListener("click", () => {
+      const collapsed = wrapper.classList.toggle("collapsed");
+      toggle.textContent = collapsed ? "[+]" : "[–]";
+      toggle.setAttribute("aria-expanded", String(!collapsed));
+      toggle.title = collapsed ? "Expand thread" : "Collapse thread";
+    });
+    head.prepend(toggle);
+  }
+  wrapper.append(head);
+  if (!placeholder && node.text) wrapper.append(el("div", { class: "body" }, linkify(node.text)));
+  if (node.children.length) wrapper.append(el("div", { class: "replies" }, ...node.children.map(commentNode)));
+  return wrapper;
+}
+
+let itemRequest = 0; // lets a slow response for a thread you've left be ignored
+
+async function showItem(id) {
+  const request = ++itemRequest;
+  feedView.hidden = true;
+  itemView.hidden = false;
+  window.scrollTo(0, 0);
+
+  const reload = el("button", { type: "button", onclick: () => showItem(id) }, "Reload");
+  const toolbar = el("div", { class: "toolbar" }, el("a", { href: "#" }, "← Back to the feed"), reload);
+  const known = stories.find((s) => s.id === id);
+  const loading = known?.descendants ? `Loading ${plural(known.descendants, "comment")}…` : "Loading…";
+  itemView.replaceChildren(toolbar, el("p", { class: "placeholder" }, loading));
+
+  try {
+    const tree = await getJSON(`/api/item/${id}`);
+    if (request !== itemRequest) return;
+    const comments = tree.children.length
+      ? el("section", { class: "comments" }, ...tree.children.map(commentNode))
+      : el("p", { class: "placeholder" }, "No comments yet.");
+    itemView.replaceChildren(toolbar, storyRow(tree, { inThread: true }), comments);
+  } catch (err) {
+    if (request !== itemRequest) return;
+    itemView.replaceChildren(toolbar, el("p", { class: "error" }, `Could not load item ${id}: ${err.message}`));
+  }
+}
+
+function route() {
+  const match = location.hash.match(/^#\/item\/(\d+)$/);
+  if (match) {
+    showItem(Number(match[1]));
+  } else {
+    itemRequest++;
+    itemView.hidden = true;
+    feedView.hidden = false;
+    if (seenIds != null) renderFeed();
+  }
+}
+
+const feedName = FEED_NAMES[CONFIG.feed] ?? CONFIG.feed;
+document.title = `${feedName} · hn-tree`;
+document.getElementById("feed-title").textContent = `${feedName} stories`;
+const count = plural(CONFIG.limit, "story", "stories");
+document.getElementById("feed-sub").textContent =
+  `${CONFIG.feed === "week" ? `The ${count} with the most points from the past 7 days` : `The latest ${count}`}, ` +
+  `checked every ${CONFIG.interval}s. Click a title to open its thread.`;
+
+window.addEventListener("hashchange", route);
+if (location.hash) route();
+poll();
+</script>
+</body>
+</html>
